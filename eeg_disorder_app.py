@@ -1,25 +1,62 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import joblib
 import time
-from PIL import Image
 import warnings
-import google.generativeai as genai
 import os
-from dotenv import load_dotenv
+
+# Handle optional imports gracefully
+try:
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+    st.warning("⚠️ Matplotlib/Seaborn not available. Some visualizations may be limited.")
+
+try:
+    import plotly.express as px
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    HAS_PLOTLY = True
+except ImportError:
+    HAS_PLOTLY = False
+    st.error("❌ Plotly is required for this app. Please install: pip install plotly")
+
+try:
+    import joblib
+    HAS_JOBLIB = True
+except ImportError:
+    HAS_JOBLIB = False
+    st.error("❌ Joblib is required for this app. Please install: pip install joblib")
+
+try:
+    from PIL import Image
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+
+try:
+    import google.generativeai as genai
+    from dotenv import load_dotenv
+    HAS_GENAI = True
+except ImportError:
+    HAS_GENAI = False
+    st.warning("⚠️ Google Generative AI not available. AI enhancement features will be disabled.")
+
 warnings.filterwarnings('ignore')
 
-# Load environment variables
-load_dotenv()
-
-# Configure Gemini AI
-genai.configure(api_key=os.getenv('gemini'))
+# Load environment variables and configure Gemini AI
+if HAS_GENAI:
+    try:
+        load_dotenv()
+        genai.configure(api_key=os.getenv('gemini'))
+        GEMINI_AVAILABLE = True
+    except Exception as e:
+        GEMINI_AVAILABLE = False
+        st.warning(f"⚠️ Gemini AI configuration failed: {str(e)[:50]}...")
+else:
+    GEMINI_AVAILABLE = False
 
 # Set page configuration
 st.set_page_config(
@@ -89,6 +126,10 @@ st.markdown("""
 @st.cache_resource
 def load_models():
     """Load trained models and preprocessors"""
+    if not HAS_JOBLIB:
+        st.error("❌ Cannot load models without joblib. Please install: pip install joblib")
+        return None, None, None, None, None
+        
     try:
         model = joblib.load('best_disorder_model.pkl')
         scaler = joblib.load('feature_scaler.pkl')
@@ -96,8 +137,12 @@ def load_models():
         sleep_encoder = joblib.load('sleep_encoder.pkl')
         disorder_encoder = joblib.load('disorder_encoder.pkl')
         return model, scaler, selector, sleep_encoder, disorder_encoder
+    except FileNotFoundError as e:
+        st.error(f"❌ Model files not found: {e}")
+        st.info("💡 Please train the model first by running the training script.")
+        return None, None, None, None, None
     except Exception as e:
-        st.error(f"Error loading models: {e}")
+        st.error(f"❌ Error loading models: {e}")
         return None, None, None, None, None
 
 # Load dataset
@@ -185,11 +230,21 @@ def create_features(delta, theta, alpha, beta, gamma, sleep_state, sleep_encoder
 
 def get_gemini_analysis(delta, theta, alpha, beta, gamma, sleep_state, ml_prediction, ml_confidence):
     """Get Gemini AI analysis of EEG patterns"""
+    if not GEMINI_AVAILABLE:
+        return {
+            "clinical_interpretation": "AI analysis unavailable - using ML prediction only",
+            "ml_agreement": "agree",
+            "confidence_adjustment": "0",
+            "final_prediction": ml_prediction,
+            "clinical_insights": "Please install google-generativeai for AI enhancement",
+            "confidence_reasoning": "Standard machine learning assessment"
+        }
+    
     try:
         # Initialize Gemini model
         model = genai.GenerativeModel('gemini-2.0-flash-exp')
         
-        # Create detailed prompt for EEG analysis
+        # Updated prompt to specifically mention the 11 disorders
         prompt = f"""
         You are a specialized neurological AI assistant analyzing EEG brainwave patterns for disorder prediction.
         
@@ -205,25 +260,38 @@ def get_gemini_analysis(delta, theta, alpha, beta, gamma, sleep_state, ml_predic
         - Predicted Disorder: {ml_prediction}
         - Model Confidence: {ml_confidence:.1f}%
         
+        DISORDERS TO PREDICT FROM (11 total):
+        1. Depression - reduced alpha, increased theta
+        2. Anxiety - high beta, elevated gamma
+        3. ADHD - high theta/beta ratio (hallmark)
+        4. Bipolar Disorder - variable patterns
+        5. Schizophrenia - reduced gamma synchrony
+        6. PTSD - elevated theta and beta
+        7. OCD - elevated beta activity
+        8. Autism Spectrum Disorder - altered gamma
+        9. Eating Disorder - various patterns
+        10. Sleep Disorder - disrupted delta/theta
+        11. Parkinson Disease - increased delta/theta, reduced alpha/beta
+        
         CLINICAL CONTEXT:
-        Delta: Associated with deep sleep, brain injury, dementia
-        Theta: Linked to creativity, ADHD, depression, anxiety
+        Delta: Deep sleep, brain injury, dementia, Parkinson's
+        Theta: Creativity, ADHD, depression, anxiety, memory
         Alpha: Relaxed awareness, reduced in depression/anxiety
         Beta: Active thinking, elevated in anxiety disorders
-        Gamma: Cognitive processing, altered in schizophrenia
+        Gamma: Cognitive processing, altered in schizophrenia/autism
         
         TASK: Analyze these EEG patterns and provide:
         1. Clinical interpretation of the brainwave patterns
         2. Agreement/disagreement with ML prediction with reasoning
-        3. Final confidence adjustment (increase/decrease the {ml_confidence:.1f}% based on clinical patterns)
-        4. Any additional clinical insights
+        3. Final confidence adjustment (increase/decrease based on clinical patterns)
+        4. Must choose from the 11 disorders listed above
         
         RESPOND IN THIS EXACT JSON FORMAT:
         {{
             "clinical_interpretation": "Brief analysis of the EEG patterns",
             "ml_agreement": "agree/disagree", 
             "confidence_adjustment": "+5" or "-3" (numeric adjustment to confidence),
-            "final_prediction": "{ml_prediction}" or "alternative_disorder",
+            "final_prediction": "{ml_prediction}" or "one_of_the_11_disorders",
             "clinical_insights": "Additional medical insights",
             "confidence_reasoning": "Why confidence was adjusted"
         }}
@@ -397,15 +465,21 @@ def prediction_page(model, scaler, selector, sleep_encoder, df):
             yaxis_title="Amplitude (μV)",
             height=300
         )
-        st.plotly_chart(fig, use_container_width=True)
+        if HAS_PLOTLY:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.error("❌ Plotly required for visualization")
         
         # Power distribution pie chart
         total_power = sum(values)
         percentages = [v/total_power*100 for v in values]
         
-        fig2 = go.Figure(data=[go.Pie(labels=waves, values=percentages)])
-        fig2.update_layout(title="Power Distribution", height=300)
-        st.plotly_chart(fig2, use_container_width=True)
+        if HAS_PLOTLY:
+            fig2 = go.Figure(data=[go.Pie(labels=waves, values=percentages)])
+            fig2.update_layout(title="Power Distribution", height=300)
+            st.plotly_chart(fig2, use_container_width=True)
+        else:
+            st.error("❌ Plotly required for visualization")
     
     # Enhanced Prediction button
     if st.button("🔍 Predict Disorder", use_container_width=True, type="primary"):
